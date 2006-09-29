@@ -2,7 +2,7 @@ package WWW::Mechanize::Pliant;
 use base qw(WWW::Mechanize);
 use HTML::Entities qw(decode_entities);
 
-our $VERSION = 0.01;
+our $VERSION = 0.11;
 
 =head1 ABSTRACT
 
