@@ -1,8 +1,10 @@
 package WWW::Mechanize::Pliant;
+use strict;
+use warnings FATAL => 'all';
 use base qw(WWW::Mechanize);
 use HTML::Entities qw(decode_entities);
 
-our $VERSION = 0.11;
+our $VERSION = 0.12;
 
 =head1 ABSTRACT
 
@@ -29,10 +31,14 @@ Mechanize code, for both cases:
 
   $mech = WWW::Mechanize::Pliant->new(cookie_jar => {});
   $mech->get("http://mypliantsite.com");
-  $mech->form->set_field("search", "Beads Game");
-  $mech->form->click("Go");
+  $mech->field("search", "Beads Game");
+  $mech->click("Go");
 
 =head1 DETAILS
+
+  At the moment, three methods of WWW::Mechanize have been customized
+  for Pliant specific operation: get(), field(), and click().  
+  Instead of string names, they receive regular expressions as arguments.
 
 =cut
 
@@ -76,6 +82,81 @@ sub submit {
   return $self->postprocess || $retval;
 }
 
+sub do_operation {
+  my ($self, $regex, $func, @args) = @_;
+  my $retval = 0;
+  if (my $name = $self->pliant_form->find_field($regex) ) {
+    $self->form_name('pliant');
+    my $f = "SUPER::$func";
+    $self->$f($name, @args);
+    $retval = 1;
+  } 
+  return $retval;
+}
+
+=over
+
+=item field(pattern, value)
+
+This is the method that should be used to set the fields in the form.
+
+   $form->field('email', 'john@somedomain.com');
+   $form->field(qr{payment_data.*?card_number}, '4444222233331111');
+   ...
+   $form->click("Submit Info");
+
+=back
+
+=cut
+
+sub field {
+  my ($self, $name, $value) = @_;
+  return $self->do_operation($name, "field", $value);
+}
+
+
+=over
+
+=item click(PATTERN)
+
+This will click on an image button or on a button. It will try to find 
+the button using these two regular expressions against the content,
+
+  try1: qr{title="PATTERN"\s+onClick="button_pressed\('(.*?)'\)"}
+  try2: qr{name="(button.*?)"\s+value="PATTERN"}
+
+The first attempt is to find an image button with PATTERN in the title field.  
+The second attempt is to find a plain button with PATTERN in its caption.
+
+  $form->click('Next');
+  $form->click('Buy now');
+
+Since PATTERN is a regular expression, if the name of the button has parenthesis, 
+you need to escape them:
+
+  $form->click(qr{delete Greeting Card \(New Baby\)});
+  
+=back
+
+=cut
+
+sub click {
+  my ($self, $regex) = @_;
+  my $retval = 0;
+  my $content = decode_entities($self->content);
+  if ($content =~ m{title="$regex"\s+onClick="button_pressed\('(.*?)'\)"}) {
+    $retval = $self->pliant_click($1);
+    $self->pliant_form->reinit;
+  } elsif ($content =~ m{name="(button.*?)"\s+value="$regex"}) {
+    $retval = $self->pliant_click($1);
+    $self->pliant_form->reinit;
+  }
+  return unless $retval;
+  return $self->postprocess || $retval;
+}
+
+=head2 LOW LEVEL METHODS
+
 =over
 
 =item pliant_click(context)
@@ -95,39 +176,43 @@ To click on it, do this
     $retval = $self->{mech}->pliant_click($1);
   }
 
+=back
+
 =cut
 
 sub pliant_click {
   my ($self, $context) = @_;
-  $self->form_name('pliant');
-  $self->field('_', $context);
-  $self->field('_pliant_x',0);
-  $self->field('_pliant_y',0);
-  return $self->submit;
+  my $form = $self->form_name('pliant');
+  my $request = $form->click;
+  my $content = $request->content;
+  $content =~ s/_=&//;
+  my @data = split '&', $content;
+  my $found_button;
+  foreach (@data) {
+      if (/button/) {
+          $found_button++;
+          $_ = "$context=";
+      } elsif ( /_pliant_x/ ) {
+          $_ = "_pliant_x=0";
+      } elsif ( /_pliant_y/ ) {
+          $_ = "_pliant_y=0";
+      }
+  }
+  push @data, $context.'=' unless $found_button;
+  $content = join '&', @data;
+  $content =~ s{&%2F}{&data%2F}g;
+  #print "request content: $content\n";
+  $request->header('Content-Length', length($content));
+  $request->content($content);
+  return $self->request($request);
 }
 
-sub _make_request {
-  my ($self, $request, @args) = @_;
-  my $content = $request->content;
-  if ($content) {
-    $content =~ s/_pliant_x=0&_pliant_y=0&_=(.*?)(&|$)/_pliant_x=0&_pliant_y=0&$1=$2/;
-    $content =~ s{&%2F}{&data%2F}g;
-    $request->header('Content-Length', length($content));
-    $request->content($content);
-  }
-  return $self->SUPER::_make_request($request, @args);
-}
+=over
 
 =item pliant_form()
 
+Low-level method. Don't use.
 Fetches WWW::Mechanize::Pliant::Form object associated with current page.
-This form object is what you should use to fill the fields on the page.  It also
-has a high-level click() method that you should use instead of the 
-low-level pliant_click() method described above.
-
-   $mech->get("http://mypliantsite.com");
-   $mech->form->set_field("search", "Beads Game");
-   $mech->form->click("Search");
 
 =cut
 
@@ -145,11 +230,14 @@ sub pliant_form {
 =head2 WWW::Mechanize::Pliant::Form
 
 This helper class does some of the dirty work of locating pliant 
-fields on the pliant page.
+fields on the pliant page.  You shouldn't use it, and its documented
+here for backward compatibility and completeness.
 
 =cut
 
 package WWW::Mechanize::Pliant::Form;
+use strict;
+use warnings FATAL => 'all';
 use HTML::Entities qw(decode_entities);
 
 =over
@@ -193,64 +281,83 @@ or undef if not found.
 
 sub find_field {
   my ($self, $regex) = @_;
-  my @matches = grep { /$regex/ } @{$self->{fields}};
-  return $matches[0];
+  my @inputs = $self->{mech}->form('pliant')->find_input($regex);
+  my @retval;
+  if ( @inputs ) {
+    @retval = map { $_->name } @inputs;
+  } else {
+    @retval = grep { /$regex/ } @{$self->{fields}};
+  }
+  return wantarray ? @retval : $retval[0];
+}
+
+sub do_operation {
+  my ($self, $regex, $func, @args) = @_;
+  my $retval = 0;
+  if (my $name = $self->find_field($regex) ) {
+    $self->{mech}->form_name('pliant');
+    $self->{mech}->$func($name, @args);
+    $retval = 1;
+  } 
+  return $retval;
 }
 
 =item set_field(pattern, value)
 
-This is the method that should be used to set the fields in the form.
-
-   $form->set_field('email', 'john@somedomain.com');
-   $form->set_field(qr{payment_data.*?card_number}, '4444222233331111');
-   ...
-   $form->click("Submit Info");
-
+See WWW::Mechanize::Pliant::field(), usage is the same.
+  
 =cut
 
 sub set_field {
   my ($self, $regex, $value) = @_;
-  if (my $name = $self->find_field($regex) ) {
-    $self->{mech}->form_name('pliant');
-    $self->{mech}->field($name, $value);
+  return $self->{mech}->field($regex, $value);
+}
+
+sub find_checkbox_hidden_field {
+  my ($self, $regex) = @_;
+  foreach my $checkbox_name ( grep { ! /^dummy_/ } $self->find_field($regex) ) {
+     if ($self->find_field("dummy_$checkbox_name")) {
+       return $checkbox_name;
+     }
   }
+  return undef;
+}
+
+sub tick {
+  my ($self, $regex) = @_;
+  my $hidden_field = $self->find_checkbox_hidden_field($regex);
+  $self->{mech}->form_name('pliant');
+  $self->{mech}->tick("dummy_".$hidden_field, "on");
+  $self->{mech}->field($hidden_field, "true");
+  return 1;
+}
+
+sub untick {
+  my ($self, $regex) = @_;
+  my $hidden_field = $self->find_checkbox_hidden_field($regex);
+  $self->{mech}->form_name('pliant');
+  $self->{mech}->untick("dummy_".$hidden_field, "on");
+  $self->{mech}->field($hidden_field, "false");
+  return 1;
+}
+
+sub is_ticked {
+  my ($self, $regex) = @_;
+  if (my $name = $self->find_checkbox_hidden_field($regex) ) {
+    return $self->{mech}->form_name('pliant')->find_input($name)->value eq 'true';
+  }
+  return 0;
 }
 
 =item click(PATTERN)
 
-This will click on an image button or on a button. It will try to find 
-the button using these two regular expressions against the content,
-
-  try1: qr{title="PATTERN"\s+onClick="button_pressed\('(.*?)'\)"}
-  try2: qr{name="(button.*?)"\s+value="PATTERN"}
-
-The first attempt is to find an image button with PATTERN in the title field.  
-The second attempt is to find a plain button with PATTERN in its caption.
-
-  $form->click('Next');
-  $form->click('Buy now');
-
-Since PATTERN is a regular expression, if the name of the button has parenthesis, 
-you need to escape them:
-
-  $form->click(qr{delete Greeting Card \(New Baby\)});
+See WWW::Mechanize::Pliant::click(), usage is the same.
   
-=back
-
 =cut
 
 sub click {
   my ($self, $regex) = @_;
-  my $retval = 0;
-  my $content = decode_entities($self->{mech}->content);
-  if ($content =~ m{title="$regex"\s+onClick="button_pressed\('(.*?)'\)"}) {
-    $retval = $self->{mech}->pliant_click($1);
-    $self->reinit;
-  } elsif ($content =~ m{name="(button.*?)"\s+value="$regex"}) {
-    $retval = $self->{mech}->pliant_click($1);
-    $self->reinit;
-  }
-  return $retval;
+  return $self->{mech}->click($regex);
 }
 
 =pod
